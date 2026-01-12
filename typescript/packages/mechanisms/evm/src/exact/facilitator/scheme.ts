@@ -308,10 +308,16 @@ export class ExactEvmScheme implements SchemeNetworkFacilitator {
             const deployTx = await this.signer.sendTransaction({
               to: factoryAddress as Hex,
               data: factoryCalldata as Hex,
+              // @ts-expect-error - network parameter for multi-chain support
+              network: requirements.network,
             });
 
             // Wait for deployment transaction
-            await this.signer.waitForTransactionReceipt({ hash: deployTx });
+            await this.signer.waitForTransactionReceipt({ 
+              hash: deployTx,
+              // @ts-expect-error - network parameter for multi-chain support
+              network: requirements.network,
+            });
             console.log(`Successfully deployed smart wallet for ${payerAddress}`);
           } catch (deployError) {
             console.error("Smart wallet deployment failed:", deployError);
@@ -348,6 +354,8 @@ export class ExactEvmScheme implements SchemeNetworkFacilitator {
             parsedSig.r,
             parsedSig.s,
           ],
+          // @ts-expect-error - network parameter for multi-chain support
+          network: requirements.network,
         });
       } else {
         // For smart wallets, use the bytes signature overload
@@ -365,11 +373,17 @@ export class ExactEvmScheme implements SchemeNetworkFacilitator {
             exactEvmPayload.authorization.nonce,
             signature,
           ],
+          // @ts-expect-error - network parameter for multi-chain support
+          network: requirements.network,
         });
       }
 
       // Wait for transaction confirmation
-      const receipt = await this.signer.waitForTransactionReceipt({ hash: tx });
+      const receipt = await this.signer.waitForTransactionReceipt({ 
+        hash: tx,
+        // @ts-expect-error - network parameter for multi-chain support
+        network: requirements.network,
+      });
 
       if (receipt.status !== "success") {
         return {

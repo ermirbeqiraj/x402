@@ -1,5 +1,3 @@
-import { base58 } from "@scure/base";
-import { createKeyPairSignerFromBytes } from "@solana/kit";
 import { x402Facilitator } from "@x402/core/facilitator";
 import {
   PaymentPayload,
@@ -8,14 +6,12 @@ import {
   VerifyResponse,
 } from "@x402/core/types";
 import { toFacilitatorEvmSigner } from "@x402/evm";
-import { registerExactEvmScheme } from "@x402/evm/exact/facilitator";
-import { toFacilitatorSvmSigner } from "@x402/svm";
-import { registerExactSvmScheme } from "@x402/svm/exact/facilitator";
+import { ExactEvmScheme } from "@x402/evm/exact/facilitator";
 import dotenv from "dotenv";
 import express from "express";
-import { createWalletClient, http, publicActions } from "viem";
+import { createWalletClient, defineChain, http, publicActions } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { baseSepolia } from "viem/chains";
+import { baseSepolia, sepolia } from "viem/chains";
 
 dotenv.config();
 
@@ -28,45 +24,122 @@ if (!process.env.EVM_PRIVATE_KEY) {
   process.exit(1);
 }
 
-if (!process.env.SVM_PRIVATE_KEY) {
-  console.error("❌ SVM_PRIVATE_KEY environment variable is required");
-  process.exit(1);
-}
-
 // Initialize the EVM account from private key
 const evmAccount = privateKeyToAccount(
   process.env.EVM_PRIVATE_KEY as `0x${string}`,
 );
 console.info(`EVM Facilitator account: ${evmAccount.address}`);
 
-// Initialize the SVM account from private key
-const svmAccount = await createKeyPairSignerFromBytes(
-  base58.decode(process.env.SVM_PRIVATE_KEY as string),
-);
-console.info(`SVM Facilitator account: ${svmAccount.address}`);
+// Define BSC Testnet chain
+const bscTestnet = defineChain({
+  id: 97,
+  name: 'BSC Testnet',
+  nativeCurrency: { name: 'BNB', symbol: 'tBNB', decimals: 18 },
+  rpcUrls: {
+    default: { http: ['https://bsc-testnet-rpc.publicnode.com'] },
+  },
+  blockExplorers: {
+    default: { name: 'BscScan', url: 'https://testnet.bscscan.com' },
+  },
+  testnet: true,
+});
 
-// Create a Viem client with both wallet and public capabilities
-const viemClient = createWalletClient({
+// Define BSC Mainnet chain
+const bscMainnet = defineChain({
+  id: 56,
+  name: 'BNB Smart Chain',
+  nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
+  rpcUrls: {
+    default: { http: ['https://bsc-rpc.publicnode.com'] },
+  },
+  blockExplorers: {
+    default: { name: 'BscScan', url: 'https://bscscan.com' },
+  },
+  testnet: false,
+});
+
+// Define Arbitrum Sepolia chain
+const arbitrumSepolia = defineChain({
+  id: 421614,
+  name: 'Arbitrum Sepolia',
+  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  rpcUrls: {
+    default: { http: ['https://arbitrum-sepolia-rpc.publicnode.com'] },
+  },
+  blockExplorers: {
+    default: { name: 'Arbiscan', url: 'https://sepolia.arbiscan.io' },
+  },
+  testnet: true,
+});
+
+// Create clients for each supported chain
+const baseSepoliaClient = createWalletClient({
   account: evmAccount,
   chain: baseSepolia,
-  transport: http(),
+  transport: http(process.env.RPC_BASE_SEPOLIA),
 }).extend(publicActions);
 
-// Initialize the x402 Facilitator with EVM and SVM support
+const bscTestnetClient = createWalletClient({
+  account: evmAccount,
+  chain: bscTestnet,
+  transport: http(process.env.RPC_BSC_TESTNET),
+}).extend(publicActions);
 
+const bscMainnetClient = createWalletClient({
+  account: evmAccount,
+  chain: bscMainnet,
+  transport: http(process.env.RPC_BSC_MAINNET),
+}).extend(publicActions);
+
+const ethereumSepoliaClient = createWalletClient({
+  account: evmAccount,
+  chain: sepolia,
+  transport: http(process.env.RPC_ETHEREUM_SEPOLIA),
+}).extend(publicActions);
+
+const arbitrumSepoliaClient = createWalletClient({
+  account: evmAccount,
+  chain: arbitrumSepolia,
+  transport: http(process.env.RPC_ARBITRUM_SEPOLIA),
+}).extend(publicActions);
+
+// Map network identifiers to clients
+const chainClients = new Map([
+  ['eip155:84532', baseSepoliaClient],     // Base Sepolia
+  ['eip155:97', bscTestnetClient],         // BSC Testnet
+  ['eip155:56', bscMainnetClient],         // BSC Mainnet
+  ['eip155:11155111', ethereumSepoliaClient], // Ethereum Sepolia
+  ['eip155:421614', arbitrumSepoliaClient],   // Arbitrum Sepolia
+]);
+
+// Helper to get client for a network
+const getClientForNetwork = (network: string) => {
+  const client = chainClients.get(network);
+  if (!client) {
+    throw new Error(`No client configured for network: ${network}`);
+  }
+  return client;
+};
+
+// Initialize the x402 Facilitator with multi-chain EVM support
 const evmSigner = toFacilitatorEvmSigner({
-  getCode: (args: { address: `0x${string}` }) => viemClient.getCode(args),
+  getCode: (args: { address: `0x${string}` }) => {
+    // For getCode, use Base Sepolia as default (usually for verification)
+    return baseSepoliaClient.getCode(args);
+  },
   address: evmAccount.address,
   readContract: (args: {
     address: `0x${string}`;
     abi: readonly unknown[];
     functionName: string;
     args?: readonly unknown[];
-  }) =>
-    viemClient.readContract({
+  }) => {
+    // For reads, use Base Sepolia as default
+    return baseSepoliaClient.readContract({
       ...args,
       args: args.args || [],
-    }),
+    });
+  },
   verifyTypedData: (args: {
     address: `0x${string}`;
     domain: Record<string, unknown>;
@@ -75,25 +148,32 @@ const evmSigner = toFacilitatorEvmSigner({
     message: Record<string, unknown>;
     signature: `0x${string}`;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  }) => viemClient.verifyTypedData(args as any),
+  }) => baseSepoliaClient.verifyTypedData(args as any),
   writeContract: (args: {
     address: `0x${string}`;
     abi: readonly unknown[];
     functionName: string;
     args: readonly unknown[];
-  }) =>
-    viemClient.writeContract({
+    network?: string;
+  }) => {
+    // @ts-expect-error network is added for multi-chain support
+    const client = args.network ? getClientForNetwork(args.network) : baseSepoliaClient;
+    return client.writeContract({
       ...args,
       args: args.args || [],
-    }),
-  sendTransaction: (args: { to: `0x${string}`; data: `0x${string}` }) =>
-    viemClient.sendTransaction(args),
-  waitForTransactionReceipt: (args: { hash: `0x${string}` }) =>
-    viemClient.waitForTransactionReceipt(args),
+    });
+  },
+  sendTransaction: (args: { to: `0x${string}`; data: `0x${string}`; network?: string }) => {
+    // @ts-expect-error network is added for multi-chain support
+    const client = args.network ? getClientForNetwork(args.network) : baseSepoliaClient;
+    return client.sendTransaction(args);
+  },
+  waitForTransactionReceipt: (args: { hash: `0x${string}`; network?: string }) => {
+    // @ts-expect-error network is added for multi-chain support
+    const client = args.network ? getClientForNetwork(args.network) : baseSepoliaClient;
+    return client.waitForTransactionReceipt(args);
+  },
 });
-
-// Facilitator can now handle all Solana networks with automatic RPC creation
-const svmSigner = toFacilitatorSvmSigner(svmAccount);
 
 const facilitator = new x402Facilitator()
   .onBeforeVerify(async (context) => {
@@ -115,19 +195,29 @@ const facilitator = new x402Facilitator()
     console.log("Settle failure", context);
   });
 
-// Register EVM and SVM schemes using the new register helpers
-registerExactEvmScheme(facilitator, {
-  signer: evmSigner,
-  networks: "eip155:84532", // Base Sepolia
-  deployERC4337WithEIP6492: true,
-});
-registerExactSvmScheme(facilitator, {
-  signer: svmSigner,
-  networks: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", // Devnet
-});
+// Register only V2 networks (no V1)
+facilitator.register(
+  [
+    "eip155:84532",    // Base Sepolia
+    "eip155:97",       // BSC Testnet
+    "eip155:56",       // BSC Mainnet
+    "eip155:11155111", // Ethereum Sepolia
+    "eip155:421614",   // Arbitrum Sepolia
+  ],
+  new ExactEvmScheme(evmSigner, {
+    deployERC4337WithEIP6492: true,
+  }),
+);
 
 // Initialize Express app
 const app = express();
+
+// Add request logging middleware
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
+});
+
 app.use(express.json());
 
 /**
@@ -231,6 +321,9 @@ app.get("/supported", async (req, res) => {
 });
 
 // Start the server
-app.listen(parseInt(PORT), () => {
-  console.log("Facilitator listening");
+console.log(`About to listen on port ${PORT}...`);
+app.listen(parseInt(PORT), "0.0.0.0", () => {
+  console.log(`Facilitator listening on http://0.0.0.0:${PORT}`);
+}).on('error', (err) => {
+  console.error(`Failed to start server:`, err);
 });
